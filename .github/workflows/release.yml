@@ -15,7 +15,7 @@ jobs:
         include:
           - runner: ubuntu-24.04
             archive: tpokr-linux-x86_64.tar.gz
-          - runner: macos-14
+          - runner: macos-15
             archive: tpokr-macos-arm64.tar.gz
 
     runs-on: ${{ matrix.runner }}
