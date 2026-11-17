@@ -475,14 +475,14 @@ pub fn run() -> io::Result<()> {
         Some(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: tpokr [--profile name]",
+                "usage: tpokr-client [--profile name]",
             ));
         }
     };
     if args.next().is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: tpokr [--profile name]",
+            "usage: tpokr-client [--profile name]",
         ));
     }
     let mut app = App::new(servers);

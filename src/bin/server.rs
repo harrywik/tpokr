@@ -16,7 +16,7 @@ fn main() -> io::Result<()> {
     if args.next().is_some() || !(2..=10).contains(&capacity) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: server [address:port] [players: 2-10]",
+            "usage: tpokr-server [address:port] [players: 2-10]",
         ));
     }
     let listener = TcpListener::bind(&address)?;

@@ -2,7 +2,16 @@
 name = "tpokr"
 version = "0.0.1"
 edition = "2024"
-default-run = "tpokr"
+default-run = "tpokr-client"
+autobins = false
+
+[[bin]]
+name = "tpokr-client"
+path = "src/main.rs"
+
+[[bin]]
+name = "tpokr-server"
+path = "src/bin/server.rs"
 
 [dependencies]
 crossterm = "0.29"

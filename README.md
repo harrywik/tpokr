@@ -7,10 +7,12 @@ A terminal poker client and a separate single-room server. It plays consecutive 
 Start a server for two players:
 
 ```sh
-cargo run --bin server -- 127.0.0.1:7878 2
+cargo run --bin tpokr-server -- 127.0.0.1:7878 2
 ```
 
 Open two other terminals. Run `cargo run -- --profile alice` in one and `cargo run -- --profile bob` in the other. Select the local server and press Enter. Each player needs a separate profile. The server shuffles one 52-card deck and deals two private cards to each player when the room is full. It deals subsequent hands after a five-second result display.
+
+Release archives contain `tpokr-client` and `tpokr-server`. Run them directly as `./tpokr-client --profile alice` and `./tpokr-server 127.0.0.1:7878 2`.
 
 The server accepts an address and a room size between 2 and 10. It defaults to `127.0.0.1:7878` and two players. A waiting player who leaves frees a seat. Once the hand starts, a player can rejoin their seat by selecting the same server with the same profile. An offline player checks when possible and otherwise folds. Rejoining does not undo a fold.
 
