@@ -1,0 +1,12 @@
+[package]
+name = "tpokr"
+version = "0.1.0"
+edition = "2024"
+default-run = "tpokr"
+
+[dependencies]
+crossterm = "0.29"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "unstable-rendered-line-info"] }
