@@ -9,7 +9,7 @@ use crossterm::{
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use rand::{RngCore, rngs::OsRng};
+use rand::{TryRng, rngs::SysRng};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{
     io::{self, IsTerminal},
@@ -26,7 +26,9 @@ const FRAME_TIME: Duration = Duration::from_millis(250);
 
 fn new_session() -> String {
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("system random source unavailable");
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

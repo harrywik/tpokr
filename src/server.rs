@@ -233,7 +233,7 @@ impl Room {
             .into_iter()
             .flat_map(|suit| (2..=14).map(move |rank| Card { rank, suit }))
             .collect();
-        self.deck.shuffle(&mut rand::thread_rng());
+        self.deck.shuffle(&mut rand::rng());
         for player in self.players.values_mut() {
             player.cards = None;
         }
@@ -779,9 +779,11 @@ mod tests {
         stream.write_all(b"\n").unwrap();
     }
     fn send_join(stream: &mut TcpStream) {
-        use rand::RngCore;
+        use rand::TryRng;
         let mut token = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut token);
+        rand::rngs::SysRng
+            .try_fill_bytes(&mut token)
+            .expect("system random source unavailable");
         send_join_token(
             stream,
             &token.iter().map(|b| format!("{b:02x}")).collect::<String>(),
