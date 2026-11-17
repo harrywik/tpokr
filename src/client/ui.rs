@@ -29,14 +29,16 @@ const LOGO: [&str; 6] = [
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
-    frame.render_widget(Block::default().style(Style::default().bg(FELT)), area);
+    if app.card_theme.color {
+        frame.render_widget(Block::default().style(Style::default().bg(FELT)), area);
+    }
 
     if let Screen::Room { name, state } = &app.screen {
         table::draw_table(frame, area, name, state.as_ref(), app);
         return;
     }
 
-    if area.width < 48 || area.height < 27 {
+    if app.card_theme.ascii || !app.card_theme.color || area.width < 48 || area.height < 27 {
         draw_compact(frame, area, app);
         return;
     }
@@ -82,7 +84,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App) {
             .style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD)),
         rows[1],
     );
-    draw_cards(frame, rows[2], app.frame);
+    draw_cards(frame, rows[2], app.frame, app.card_theme);
     draw_prompt(frame, rows[3], app);
     draw_footer(frame, rows[4], app);
 }
@@ -98,12 +100,26 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
-fn draw_cards(frame: &mut Frame<'_>, area: Rect, tick: u64) {
-    const CARDS: [(&str, &str, Color); 4] = [
-        ("A", "♠", FELT),
-        ("K", "♥", RED),
-        ("Q", "♣", FELT),
-        ("J", "♦", RED),
+fn draw_cards(frame: &mut Frame<'_>, area: Rect, tick: u64, theme: super::cards::CardTheme) {
+    use super::cards::{CardFace, CardSize, CardWidget};
+    use tpokr::protocol::{Card, Suit};
+    const CARDS: [Card; 4] = [
+        Card {
+            rank: 14,
+            suit: Suit::Spades,
+        },
+        Card {
+            rank: 13,
+            suit: Suit::Hearts,
+        },
+        Card {
+            rank: 12,
+            suit: Suit::Clubs,
+        },
+        Card {
+            rank: 11,
+            suit: Suit::Diamonds,
+        },
     ];
     const WIDTH: u16 = 9;
     const GAP: u16 = 2;
@@ -112,28 +128,22 @@ fn draw_cards(frame: &mut Frame<'_>, area: Rect, tick: u64) {
         return;
     }
     let x = area.x + (area.width - total_width) / 2;
-    for (index, (rank, suit, color)) in CARDS.iter().enumerate() {
+    for (index, card) in CARDS.iter().enumerate() {
         // A small travelling wave lifts one card at a time, without blocking input.
         let lift = u16::from((tick as usize % 4) == index);
-        let card = Rect::new(
+        let card_area = Rect::new(
             x + index as u16 * (WIDTH + GAP),
             area.y + 1 - lift,
             WIDTH,
             7,
         );
-        let style = Style::default().fg(*color).bg(WHITE);
-        let lines = vec![
-            Line::from(format!("{rank} {suit}")),
-            Line::from(""),
-            Line::from(format!("  {suit}")),
-            Line::from(""),
-            Line::from(format!("    {rank}")),
-        ];
         frame.render_widget(
-            Paragraph::new(lines)
-                .style(style)
-                .block(Block::default().borders(Borders::ALL).border_style(style)),
-            card,
+            CardWidget {
+                face: CardFace::Up(*card),
+                size: CardSize::Large,
+                theme,
+            },
+            card_area,
         );
     }
 }
@@ -256,10 +266,20 @@ fn draw_compact(frame: &mut Frame<'_>, area: Rect, app: &App) {
         },
         Style::default().fg(MUTED),
     ));
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(WHITE)),
-        area,
-    );
+    let style = if app.card_theme.color {
+        Style::default().fg(WHITE)
+    } else {
+        Style::default()
+    };
+    if !app.card_theme.color {
+        for line in &mut lines {
+            line.style = Style::default();
+            for span in &mut line.spans {
+                span.style = Style::default();
+            }
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).style(style), area);
 }
 
 #[cfg(test)]
@@ -285,6 +305,10 @@ mod tests {
     fn renders_table_with_private_cards_and_opponents() {
         use tpokr::protocol::{Card, PlayerStatus, PlayerView, RoomState, Suit};
         let mut app = App::new(vec![]);
+        app.card_theme = super::super::cards::CardTheme {
+            ascii: false,
+            color: true,
+        };
         app.screen = Screen::Room {
             name: "Local".into(),
             state: Some(RoomState {
@@ -373,7 +397,7 @@ mod tests {
             "2♣",
             "3♦",
             "4♥",
-            "###",
+            "▒░▒",
             "POT  42",
             "turn",
             "bob]: checked",
@@ -384,9 +408,53 @@ mod tests {
         assert!(bar.contains("Check"));
         assert!(bar.contains("Raise"));
         assert!(bar.contains("Minimum raise to 20"));
+        let rich = render(110, 45, &app);
+        assert!(rich.contains("╭───────╮"));
+        assert!(rich.contains("A♠"));
+        let rich_lines: Vec<_> = rich.lines().collect();
+        let board_top = rich_lines
+            .iter()
+            .position(|line| line.matches("╭───────╮").count() == 5)
+            .unwrap();
+        assert_eq!(rich_lines[board_top + 6].matches("╰───────╯").count(), 5);
+        assert!(rich_lines[board_top + 7].contains("POT  42"));
+        if let Screen::Room {
+            state: Some(state), ..
+        } = &mut app.screen
+        {
+            state.players[1].revealed_cards = Some([
+                Card {
+                    rank: 10,
+                    suit: Suit::Hearts,
+                },
+                Card {
+                    rank: 7,
+                    suit: Suit::Spades,
+                },
+            ]);
+        }
+        let showdown = render(80, 33, &app);
+        assert!(showdown.contains("10♥"));
+        assert!(showdown.contains("7♠"));
+        assert!(!showdown.contains("▒░▒"));
+        if let Screen::Room {
+            state: Some(state), ..
+        } = &mut app.screen
+        {
+            state.players[1].revealed_cards = None;
+        }
         let compact = render(40, 12, &app);
         assert!(compact.contains("Your cards: A♠  K♥"));
         assert!(compact.contains("Enlarge terminal"));
+        app.card_theme = super::super::cards::CardTheme {
+            ascii: true,
+            color: false,
+        };
+        let ascii = render(80, 33, &app);
+        assert!(ascii.contains("Your cards: AS  KH"));
+        assert!(ascii.contains("P2: turn 1000 [## ##]"));
+        assert!(ascii.contains("Board: 2C 3D 4H"));
+        assert!(!ascii.contains('♠'));
         render(1, 1, &app);
     }
 
@@ -524,6 +592,10 @@ mod tests {
             name: "Local".into(),
             address: "localhost:7878".into(),
         }]);
+        app.card_theme = super::super::cards::CardTheme {
+            ascii: false,
+            color: true,
+        };
         let first = render(80, 30, &app);
         let logo_width = LOGO.iter().map(|line| line.len()).max().unwrap();
         let lines: Vec<_> = first.lines().collect();

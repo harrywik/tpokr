@@ -16,6 +16,8 @@ pub struct Seat {
 
 pub struct Betting {
     pub seats: BTreeMap<u64, Seat>,
+    pub small_blind: u64,
+    pub big_blind: u64,
     pub turn: Option<u64>,
     pub current_bet: u64,
     pub min_raise: u64,
@@ -95,6 +97,8 @@ impl Betting {
         let complete = pending.is_empty() || only_matched;
         Self {
             seats,
+            small_blind: sb,
+            big_blind: bb,
             turn: if complete { None } else { first },
             current_bet,
             min_raise: BIG_BLIND,

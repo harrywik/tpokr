@@ -20,6 +20,8 @@ The server accepts an address and a room size between 2 and 10. It defaults to `
 
 On the server selector, use `j` and `k` or the arrow keys to change the selection, Enter to join, `a` to add, `e` to edit, and `d` to delete. Confirm deletion with `y`. In the editor, Tab switches fields, Enter saves, and Esc cancels. In a room, use `h` and `l` to select an action and Enter to submit it. Use `k` and `j` to scroll the activity log. For Raise, enter the total wager for the round, not the increase, and press Enter. Select Cash out and confirm with `y` to leave the game as a viewer after the current hand settles. Esc cancels raise entry. Otherwise, Esc or `q` leaves the room. Ctrl+C quits.
 
+Set `TPOKR_ASCII=1` to use the plain-text table and ASCII suit letters. Set `NO_COLOR=1` to use the plain-text table without colors.
+
 Server entries are stored in `$XDG_CONFIG_HOME/tpokr/servers.json`, or `~/.config/tpokr/servers.json` if `XDG_CONFIG_HOME` is unset. The local server is the default when no file exists. Each profile has a separate session token in the same directory. The default profile is `default`. Use distinct profiles when running multiple players on the same machine.
 
 ## Protocol and security

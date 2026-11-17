@@ -247,6 +247,11 @@ impl Room {
             "Hand {}: blinds {SMALL_BLIND}/{BIG_BLIND}",
             self.hand_number
         ));
+        let betting = self.betting.as_ref().unwrap();
+        let (sb, bb) = (betting.small_blind, betting.big_blind);
+        let (sb_amount, bb_amount) = (betting.seats[&sb].bet, betting.seats[&bb].bet);
+        self.record_player(sb, format!("posted small blind {sb_amount}"));
+        self.record_player(bb, format!("posted big blind {bb_amount}"));
         self.record("Hole cards dealt".into());
     }
 
@@ -319,22 +324,9 @@ impl Room {
     }
 
     fn state(&self, id: u64) -> Option<RoomState> {
-        let seats: Vec<_> = self
-            .betting
-            .as_ref()
-            .map(|b| b.seats.keys().copied().collect())
-            .unwrap_or_default();
         let dealer = self.dealer;
-        let index = dealer.and_then(|d| seats.iter().position(|id| *id == d));
-        let small_blind = index.map(|i| {
-            seats[if seats.len() == 2 {
-                i
-            } else {
-                (i + 1) % seats.len()
-            }]
-        });
-        let big_blind = small_blind
-            .map(|sb| seats[(seats.iter().position(|&id| id == sb).unwrap() + 1) % seats.len()]);
+        let small_blind = self.betting.as_ref().map(|b| b.small_blind);
+        let big_blind = self.betting.as_ref().map(|b| b.big_blind);
         self.players.get(&id).map(|player| RoomState {
             capacity: self.capacity,
             you: id,
@@ -1239,6 +1231,81 @@ mod tests {
                 .iter()
                 .all(|p| p.revealed_cards.is_none())
         );
+    }
+
+    #[test]
+    fn blinds_remain_distinct_during_disconnect_and_next_hand() {
+        for capacity in 2..=10 {
+            for disconnected in 0..capacity as u64 {
+                let (mut room, _peers, _receivers) = test_room(capacity);
+                let before: Vec<_> = room
+                    .state(0)
+                    .unwrap()
+                    .players
+                    .iter()
+                    .map(|p| (p.id, p.small_blind, p.big_blind))
+                    .collect();
+                room.leave(disconnected);
+                let after: Vec<_> = room
+                    .state(0)
+                    .unwrap()
+                    .players
+                    .iter()
+                    .map(|p| (p.id, p.small_blind, p.big_blind))
+                    .collect();
+                assert_eq!(
+                    before, after,
+                    "capacity {capacity}, disconnected {disconnected}"
+                );
+                for _ in 0..50 {
+                    if matches!(room.street, Street::Finished | Street::Showdown) {
+                        break;
+                    }
+                    let betting = room.betting.as_ref().unwrap();
+                    let id = betting.turn.unwrap();
+                    let action = if betting.seats[&id].bet == betting.current_bet {
+                        Action::Check
+                    } else {
+                        Action::Call
+                    };
+                    room.betting.as_mut().unwrap().act(id, action).unwrap();
+                    room.advance();
+                }
+                assert!(matches!(room.street, Street::Finished | Street::Showdown));
+                if !room.game_over {
+                    room.start_hand();
+                    let betting = room.betting.as_ref().unwrap();
+                    assert_ne!(betting.small_blind, betting.big_blind);
+                    assert_eq!(
+                        betting.seats[&betting.small_blind].bet,
+                        SMALL_BLIND.min(room.players[&betting.small_blind].stack)
+                    );
+                    assert_eq!(
+                        betting.seats[&betting.big_blind].bet,
+                        BIG_BLIND.min(room.players[&betting.big_blind].stack)
+                    );
+                    let state = room.state(0).unwrap();
+                    assert_eq!(
+                        state
+                            .players
+                            .iter()
+                            .filter(|p| p.small_blind)
+                            .map(|p| p.id)
+                            .collect::<Vec<_>>(),
+                        vec![betting.small_blind]
+                    );
+                    assert_eq!(
+                        state
+                            .players
+                            .iter()
+                            .filter(|p| p.big_blind)
+                            .map(|p| p.id)
+                            .collect::<Vec<_>>(),
+                        vec![betting.big_blind]
+                    );
+                }
+            }
+        }
     }
 
     #[test]

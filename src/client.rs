@@ -1,3 +1,4 @@
+mod cards;
 mod config;
 mod network;
 mod ui;
@@ -70,6 +71,7 @@ struct App {
     servers: Vec<Server>,
     session: String,
     profile: String,
+    card_theme: cards::CardTheme,
     selected: usize,
     screen: Screen,
     message: Option<String>,
@@ -91,6 +93,7 @@ impl App {
             servers,
             session: new_session(),
             profile: "default".into(),
+            card_theme: cards::CardTheme::from_env(),
             selected: 0,
             screen: Screen::Select,
             message: None,

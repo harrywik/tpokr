@@ -1,3 +1,4 @@
+use super::super::cards::{CardFace, CardSize, CardWidget};
 use super::{App, FELT, GOLD, MUTED, PANEL, RED, WHITE};
 use ratatui::{
     Frame,
@@ -15,6 +16,10 @@ pub(super) fn draw_table(
     state: Option<&RoomState>,
     app: &App,
 ) {
+    if app.card_theme.ascii || !app.card_theme.color {
+        draw_small(frame, area, name, state, 0, 0, app);
+        return;
+    }
     let (min_width, base_height) = match state.map(|s| s.capacity).unwrap_or(2) {
         7.. => (110, 40),
         4.. => (90, 34),
@@ -88,30 +93,42 @@ pub(super) fn draw_table(
         table,
     );
     let inner = Rect::new(table.x + 1, table.y + 1, table.width - 2, table.height - 2);
+    let rich_board = inner.width >= 65 && inner.height >= 29;
+    let (board_size, board_y) = if rich_board {
+        (CardSize::Large, inner.y + inner.height / 2 - 5)
+    } else {
+        (CardSize::Compact, inner.y + inner.height / 2 - 3)
+    };
+    let (board_card_width, board_card_height) = board_size.dimensions();
+    // Place the pot below the whole board, not inside the larger cards.
     let pot = Rect::new(
         inner.x + inner.width / 2 - 6,
-        inner.y + inner.height / 2,
+        board_y + board_card_height,
         12,
         1,
     );
-    let board = Rect::new(
-        inner.x + inner.width / 2 - 13,
-        inner.y + inner.height / 2 - 2,
-        26,
-        1,
-    );
-    let board_text = state
-        .board
-        .iter()
-        .map(|card| format!("[{card}]"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    frame.render_widget(
-        Paragraph::new(board_text)
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(WHITE).add_modifier(Modifier::BOLD)),
-        board,
-    );
+    let board_width = 5 * board_card_width + 4;
+    let board_x = inner.x + (inner.width - board_width) / 2;
+    for index in 0..5 {
+        let face = state
+            .board
+            .get(index)
+            .copied()
+            .map_or(CardFace::Empty, CardFace::Up);
+        frame.render_widget(
+            CardWidget {
+                face,
+                size: board_size,
+                theme: app.card_theme,
+            },
+            Rect::new(
+                board_x + index as u16 * (board_card_width + 1),
+                board_y,
+                board_card_width,
+                board_card_height,
+            ),
+        );
+    }
     frame.render_widget(
         Paragraph::new(format!("POT  {}", state.pot))
             .alignment(Alignment::Center)
@@ -186,36 +203,44 @@ pub(super) fn draw_table(
             } else {
                 player.revealed_cards
             };
-            let cards = if let Some(cards) = visible {
-                format!("│{:<3}││{:<3}│", cards[0].to_string(), cards[1].to_string())
-            } else if player.viewer || state.hand_number == 0 {
-                "│ - ││ - │".to_owned()
-            } else {
-                "│###││###│".to_owned()
-            };
-            let lines = vec![
-                Line::raw(label),
-                Line::raw("┌───┐┌───┐"),
-                Line::raw(cards),
-                Line::raw("└───┘└───┘"),
-                Line::styled(
-                    if player.online {
-                        format!("{status} {}", player.stack)
-                    } else {
-                        format!("off/{status}")
+            frame.render_widget(
+                Paragraph::new(label)
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(WHITE)),
+                Rect::new(seat.x, seat.y, seat.width, 1),
+            );
+            for index in 0..2 {
+                let face = if let Some(cards) = visible {
+                    CardFace::Up(cards[index])
+                } else if player.viewer || state.hand_number == 0 {
+                    CardFace::Empty
+                } else {
+                    CardFace::Down
+                };
+                frame.render_widget(
+                    CardWidget {
+                        face,
+                        size: CardSize::Compact,
+                        theme: app.card_theme,
                     },
-                    Style::default().fg(if player.status == PlayerStatus::Turn {
+                    Rect::new(seat.x + 1 + index as u16 * 5, seat.y + 1, 5, 3),
+                );
+            }
+            frame.render_widget(
+                Paragraph::new(if player.online {
+                    format!("{status} {}", player.stack)
+                } else {
+                    format!("off/{status}")
+                })
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(
+                    if player.status == PlayerStatus::Turn {
                         GOLD
                     } else {
                         MUTED
-                    }),
-                ),
-            ];
-            frame.render_widget(
-                Paragraph::new(lines)
-                    .alignment(Alignment::Center)
-                    .style(Style::default().fg(WHITE)),
-                seat,
+                    },
+                )),
+                Rect::new(seat.x, seat.y + 4, seat.width, 1),
             );
         } else {
             frame.render_widget(
@@ -316,6 +341,26 @@ fn draw_action_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
+fn card_text(card: tpokr::protocol::Card, ascii: bool) -> String {
+    if !ascii {
+        return card.to_string();
+    }
+    let suit = match card.suit {
+        tpokr::protocol::Suit::Clubs => 'C',
+        tpokr::protocol::Suit::Diamonds => 'D',
+        tpokr::protocol::Suit::Hearts => 'H',
+        tpokr::protocol::Suit::Spades => 'S',
+    };
+    let rank = match card.rank {
+        11 => "J".into(),
+        12 => "Q".into(),
+        13 => "K".into(),
+        14 => "A".into(),
+        n => n.to_string(),
+    };
+    format!("{rank}{suit}")
+}
+
 fn draw_small(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -337,24 +382,72 @@ fn draw_small(
             state.pot
         )));
         lines.push(Line::raw(match state.cards {
-            Some(cards) => format!("Your cards: {}  {}", cards[0], cards[1]),
+            Some(cards) => format!(
+                "Your cards: {}  {}",
+                card_text(cards[0], app.card_theme.ascii),
+                card_text(cards[1], app.card_theme.ascii)
+            ),
             None => "Waiting for cards".into(),
         }));
-        lines.push(Line::styled(
-            format!("Enlarge terminal for table view ({min_width}x{min_height})."),
-            Style::default().fg(RED),
-        ));
+        if min_width > 0 {
+            lines.push(Line::styled(
+                format!("Enlarge terminal for table view ({min_width}x{min_height})."),
+                Style::default().fg(RED),
+            ));
+        }
+        if app.card_theme.ascii || !app.card_theme.color {
+            for player in &state.players {
+                let status = if player.viewer {
+                    "viewer"
+                } else if !player.online {
+                    "offline"
+                } else {
+                    match player.status {
+                        PlayerStatus::Waiting => "waiting",
+                        PlayerStatus::Ready => "ready",
+                        PlayerStatus::Disconnected => "offline",
+                        PlayerStatus::Turn => "turn",
+                        PlayerStatus::Folded => "folded",
+                        PlayerStatus::Checked => "checked",
+                        PlayerStatus::Raised => "raised",
+                        PlayerStatus::Called => "called",
+                        PlayerStatus::AllIn => "all-in",
+                    }
+                };
+                let cards = if player.id == state.you {
+                    state.cards
+                } else {
+                    player.revealed_cards
+                };
+                let hand = if let Some(cards) = cards {
+                    format!(
+                        "{} {}",
+                        card_text(cards[0], app.card_theme.ascii),
+                        card_text(cards[1], app.card_theme.ascii)
+                    )
+                } else if player.viewer || state.hand_number == 0 {
+                    "-- --".into()
+                } else {
+                    "## ##".into()
+                };
+                lines.push(Line::raw(format!(
+                    "P{}: {status} {} [{hand}]",
+                    player.id + 1,
+                    player.stack
+                )));
+            }
+        }
         lines.push(Line::raw(format!(
             "Board: {}",
             state
                 .board
                 .iter()
-                .map(ToString::to_string)
+                .map(|card| card_text(*card, app.card_theme.ascii))
                 .collect::<Vec<_>>()
                 .join(" ")
         )));
         lines.push(Line::raw("Activity:"));
-        let available = area.height.saturating_sub(9) as usize;
+        let available = (area.height as usize).saturating_sub(lines.len() + 3);
         lines.extend(
             state
                 .log
@@ -384,8 +477,18 @@ fn draw_small(
         "h/l select  Enter act  Esc/q leave",
         Style::default().fg(MUTED),
     ));
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(WHITE).bg(FELT)),
-        area,
-    );
+    let style = if app.card_theme.color {
+        Style::default().fg(WHITE).bg(FELT)
+    } else {
+        Style::default()
+    };
+    if !app.card_theme.color {
+        for line in &mut lines {
+            line.style = Style::default();
+            for span in &mut line.spans {
+                span.style = Style::default();
+            }
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).style(style), area);
 }
