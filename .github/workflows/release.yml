@@ -15,8 +15,13 @@ jobs:
         include:
           - runner: ubuntu-24.04
             archive: tpokr-linux-x86_64.tar.gz
+            windows: false
           - runner: macos-15
             archive: tpokr-macos-arm64.tar.gz
+            windows: false
+          - runner: windows-2025
+            archive: tpokr-windows-x86_64.zip
+            windows: true
 
     runs-on: ${{ matrix.runner }}
 
@@ -26,13 +31,22 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Run tests
+        run: cargo test --locked
+
       - name: Build binaries
         run: cargo build --release --locked
 
-      - name: Package binaries
+      - name: Package Unix binaries
+        if: ${{ !matrix.windows }}
         run: |
           tar -czf "${{ matrix.archive }}" \
             -C target/release tpokr-client tpokr-server
+
+      - name: Package Windows binaries
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        run: Compress-Archive -Path target/release/tpokr-client.exe, target/release/tpokr-server.exe -DestinationPath '${{ matrix.archive }}'
 
       - uses: actions/upload-artifact@v7
         with:
@@ -55,5 +69,5 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            artifacts/*.tar.gz \
+            artifacts/*.tar.gz artifacts/*.zip \
             --generate-notes

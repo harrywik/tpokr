@@ -12,7 +12,7 @@ cargo run --bin tpokr-server -- 127.0.0.1:7878 2
 
 Open two other terminals. Run `cargo run -- --profile alice` in one and `cargo run -- --profile bob` in the other. Select the local server and press Enter. Each player needs a separate profile. The server shuffles one 52-card deck and deals two private cards to each player when the room is full. It deals subsequent hands after a five-second result display.
 
-Release archives contain `tpokr-client` and `tpokr-server`. Run them directly as `./tpokr-client --profile alice` and `./tpokr-server 127.0.0.1:7878 2`.
+Release archives contain `tpokr-client` and `tpokr-server` for Linux x86-64 and Apple Silicon macOS, and `tpokr-client.exe` and `tpokr-server.exe` for Windows x86-64. Run them directly as `./tpokr-client --profile alice` and `./tpokr-server 127.0.0.1:7878 2`. On Windows, use Windows Terminal and run `./tpokr-client.exe --profile alice` and `./tpokr-server.exe 127.0.0.1:7878 2` in PowerShell. The Windows binaries are unsigned and may trigger a SmartScreen warning.
 
 The server accepts an address and a room size between 2 and 10. It defaults to `127.0.0.1:7878` and two players. A waiting player who leaves frees a seat. Once the hand starts, a player can rejoin their seat by selecting the same server with the same profile. An offline player checks when possible and otherwise folds. Rejoining does not undo a fold.
 
@@ -22,7 +22,7 @@ On the server selector, use `j` and `k` or the arrow keys to change the selectio
 
 Set `TPOKR_ASCII=1` to use the plain-text table and ASCII suit letters. Set `NO_COLOR=1` to use the plain-text table without colors.
 
-Server entries are stored in `$XDG_CONFIG_HOME/tpokr/servers.json`, or `~/.config/tpokr/servers.json` if `XDG_CONFIG_HOME` is unset. The local server is the default when no file exists. Each profile has a separate session token in the same directory. The default profile is `default`. Use distinct profiles when running multiple players on the same machine.
+Server entries are stored in `$XDG_CONFIG_HOME/tpokr/servers.json`, or `~/.config/tpokr/servers.json` if `XDG_CONFIG_HOME` is unset. On Windows, they are stored in `%APPDATA%\tpokr\servers.json`. The local server is the default when no file exists. Each profile has a separate session token in the same directory. New session files restrict access to the current user and system on Windows, or to the current user on Unix. The default profile is `default`. Use distinct profiles when running multiple players on the same machine.
 
 ## Protocol and security
 
