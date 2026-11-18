@@ -525,6 +525,30 @@ mod tests {
             .unwrap();
         assert_eq!(buffer[(2, system_y)].fg, GOLD);
         assert_eq!(buffer[(2, player_y)].fg, WHITE);
+        if let Screen::Room {
+            state: Some(state), ..
+        } = &mut app.screen
+        {
+            state.log = (0..40)
+                .map(|n| LogEntry {
+                    player: None,
+                    name: None,
+                    message: format!("entry {n:02}"),
+                })
+                .collect();
+        }
+        for (width, height) in [(80, 33), (40, 12)] {
+            app.log_offset = 0;
+            let latest = render(width, height, &app);
+            assert!(latest.contains("entry 39"), "{latest}");
+            app.log_offset = 10;
+            let older = render(width, height, &app);
+            assert!(!older.contains("entry 39"), "{older}");
+            assert!(older.contains("entry 29"), "{older}");
+            assert!(older.contains(if width == 80 { "Actions" } else { "Action:" }));
+            app.log_offset = 0;
+            assert!(render(width, height, &app).contains("entry 39"));
+        }
     }
 
     #[test]

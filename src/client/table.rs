@@ -50,22 +50,11 @@ pub(super) fn draw_table(
     draw_action_bar(frame, rows[2], app);
     let columns = Layout::horizontal([Constraint::Length(23), Constraint::Min(1)]).split(rows[1]);
     let log = state.map(|state| state.log.as_slice()).unwrap_or(&[]);
-    let lines: Vec<_> = log.iter().map(log_line).collect();
     let block = Block::default()
         .title(" Activity ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(MUTED));
-    let inner = block.inner(columns[0]);
-    let paragraph = Paragraph::new(lines)
-        .style(Style::default().fg(WHITE))
-        .wrap(Wrap { trim: false })
-        .block(block);
-    let height = paragraph.line_count(inner.width);
-    let scroll = height
-        .saturating_sub(inner.height as usize)
-        .saturating_sub(app.log_offset as usize)
-        .min(u16::MAX as usize) as u16;
-    frame.render_widget(paragraph.scroll((scroll, 0)), columns[0]);
+    draw_activity(frame, columns[0], log, app.log_offset, Some(block), true);
     let Some(state) = state else {
         frame.render_widget(
             Paragraph::new("Connecting...")
@@ -253,6 +242,42 @@ pub(super) fn draw_table(
     }
 }
 
+fn draw_activity(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    entries: &[tpokr::protocol::LogEntry],
+    offset: u16,
+    block: Option<Block<'_>>,
+    color: bool,
+) {
+    let mut lines: Vec<_> = entries.iter().map(log_line).collect();
+    if !color {
+        for line in &mut lines {
+            line.style = Style::default();
+            for span in &mut line.spans {
+                span.style = Style::default();
+            }
+        }
+    }
+    let inner = block.as_ref().map_or(area, |block| block.inner(area));
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let mut paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    if color {
+        paragraph = paragraph.style(Style::default().fg(WHITE));
+    }
+    if let Some(block) = block {
+        paragraph = paragraph.block(block);
+    }
+    let height = paragraph.line_count(inner.width);
+    let scroll = height
+        .saturating_sub(inner.height as usize)
+        .saturating_sub(offset as usize)
+        .min(u16::MAX as usize) as u16;
+    frame.render_widget(paragraph.scroll((scroll, 0)), area);
+}
+
 fn log_line(entry: &tpokr::protocol::LogEntry) -> Line<'static> {
     let (sender, color) = match (entry.player, &entry.name) {
         (Some(id), Some(name)) => (format!("[P{} - {}]: ", id + 1, name), WHITE),
@@ -298,7 +323,23 @@ fn draw_action_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let hint = if app.confirming_cash_out {
         "Cash out after this hand? y/n".into()
     } else if app.editing_raise {
-        format!("Raise to: {}   Enter submit  Esc cancel", app.raise_input)
+        let current = match &app.screen {
+            super::Screen::Room {
+                state: Some(state), ..
+            } => Some(state.current_bet),
+            _ => None,
+        };
+        let total = current.and_then(|bet| {
+            app.raise_input
+                .parse::<u64>()
+                .ok()
+                .and_then(|increase| bet.checked_add(increase))
+        });
+        format!(
+            "Raise by: {}  Total: {}  Enter submit  Esc cancel",
+            app.raise_input,
+            total.map_or_else(|| "-".into(), |value| value.to_string())
+        )
     } else if let Some(message) = &app.action_message {
         message.clone()
     } else if let super::Screen::Room {
@@ -316,7 +357,9 @@ fn draw_action_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
             "You are viewing. No more actions are available.".into()
         } else if state.paused {
             "Game paused: a player disconnected".into()
-        } else if matches!(state.street, Street::Showdown | Street::Finished) {
+        } else if state.street == Street::Showdown {
+            "Showdown. Next hand starts after one minute.".into()
+        } else if state.street == Street::Finished {
             "Hand complete. Next hand starts shortly if enough players remain.".into()
         } else if state.cards.is_none() {
             "Waiting for players".into()
@@ -446,27 +489,58 @@ fn draw_small(
                 .collect::<Vec<_>>()
                 .join(" ")
         )));
-        lines.push(Line::raw("Activity:"));
-        let available = (area.height as usize).saturating_sub(lines.len() + 3);
-        lines.extend(
-            state
-                .log
-                .iter()
-                .skip(state.log.len().saturating_sub(available))
-                .map(log_line),
-        );
     } else {
         lines.push(Line::raw("Connecting..."));
     }
+    let top_height = (lines.len() as u16).min(area.height.saturating_sub(4));
+    let rows = Layout::vertical([
+        Constraint::Length(top_height),
+        Constraint::Min(0),
+        Constraint::Length(3),
+    ])
+    .split(area);
+    let style = if app.card_theme.color {
+        Style::default().fg(WHITE).bg(FELT)
+    } else {
+        Style::default()
+    };
+    if !app.card_theme.color {
+        for line in &mut lines {
+            line.style = Style::default();
+            for span in &mut line.spans {
+                span.style = Style::default();
+            }
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).style(style), rows[0]);
+    let log = state.map(|state| state.log.as_slice()).unwrap_or(&[]);
+    draw_activity(
+        frame,
+        rows[1],
+        log,
+        app.log_offset,
+        None,
+        app.card_theme.color,
+    );
     let names = ["Check", "Raise", "Call", "Fold", "All-in", "Cash out"];
-    lines.push(Line::styled(
+    let mut lines = vec![Line::styled(
         format!("Action: {} (h/l)", names[app.selected_action]),
         Style::default().fg(GOLD),
-    ));
+    )];
     let hint = if app.confirming_cash_out {
         "Cash out? y/n".into()
     } else if app.editing_raise {
-        format!("Raise to: {}", app.raise_input)
+        let total = state.and_then(|s| {
+            app.raise_input
+                .parse::<u64>()
+                .ok()
+                .and_then(|increase| s.current_bet.checked_add(increase))
+        });
+        format!(
+            "Raise by: {}  Total: {}",
+            app.raise_input,
+            total.map_or_else(|| "-".into(), |value| value.to_string())
+        )
     } else {
         app.action_message
             .clone()
@@ -474,7 +548,7 @@ fn draw_small(
     };
     lines.push(Line::styled(hint, Style::default().fg(MUTED)));
     lines.push(Line::styled(
-        "h/l select  Enter act  Esc/q leave",
+        "h/l select  j/k log  Esc/q leave",
         Style::default().fg(MUTED),
     ));
     let style = if app.card_theme.color {
@@ -490,5 +564,5 @@ fn draw_small(
             }
         }
     }
-    frame.render_widget(Paragraph::new(lines).style(style), area);
+    frame.render_widget(Paragraph::new(lines).style(style), rows[2]);
 }

@@ -356,6 +356,20 @@ mod tests {
         assert_eq!(b.pot(), 20);
     }
     #[test]
+    fn blind_raises_charge_only_the_additional_chips() {
+        let mut small_blind = Betting::new(&[0, 1]);
+        small_blind.act(0, Action::Raise { to: 20 }).unwrap();
+        assert_eq!(small_blind.seats[&0].bet, 20);
+        assert_eq!(small_blind.seats[&0].stack, STARTING_STACK - 20);
+        assert_eq!(small_blind.pot(), 30);
+        let mut big_blind = Betting::new(&[0, 1]);
+        big_blind.act(0, Action::Call).unwrap();
+        big_blind.act(1, Action::Raise { to: 20 }).unwrap();
+        assert_eq!(big_blind.seats[&1].bet, 20);
+        assert_eq!(big_blind.seats[&1].stack, STARTING_STACK - 20);
+        assert_eq!(big_blind.pot(), 30);
+    }
+    #[test]
     fn full_raise_and_short_all_in_do_not_automatically_reopen() {
         let mut b = Betting::new(&[0, 1, 2]);
         b.seats.get_mut(&1).unwrap().stack = 20;

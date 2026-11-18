@@ -315,18 +315,26 @@ impl App {
                         KeyCode::Char(c) if c.is_ascii_digit() && self.raise_input.len() < 20 => {
                             self.raise_input.push(c)
                         }
-                        KeyCode::Enter => match self.raise_input.parse::<u64>() {
-                            Ok(to) => {
-                                if let Some(sender) = &self.commands {
-                                    let _ = sender.send(Action::Raise { to });
+                        KeyCode::Enter => {
+                            match self.raise_input.parse::<u64>().ok().and_then(|increase| {
+                                state
+                                    .as_ref()
+                                    .and_then(|s| s.current_bet.checked_add(increase))
+                            }) {
+                                Some(to) => {
+                                    if let Some(sender) = &self.commands {
+                                        let _ = sender.send(Action::Raise { to });
+                                    }
+                                    self.editing_raise = false;
+                                    self.action_message = Some("Sending raise...".into());
                                 }
-                                self.editing_raise = false;
-                                self.action_message = Some("Sending raise...".into());
+                                None => {
+                                    self.action_message = Some(
+                                        "Enter a valid raise increase with an active game.".into(),
+                                    )
+                                }
                             }
-                            Err(_) => {
-                                self.action_message = Some("Enter a valid raise-to amount.".into())
-                            }
-                        },
+                        }
                         _ => {}
                     }
                 } else {
@@ -351,7 +359,9 @@ impl App {
                             } else if self.selected_action == 1 {
                                 self.raise_input = state
                                     .as_ref()
-                                    .map(|s| s.min_raise_to.to_string())
+                                    .map(|s| {
+                                        s.min_raise_to.saturating_sub(s.current_bet).to_string()
+                                    })
                                     .unwrap_or_default();
                                 self.editing_raise = true;
                             } else {
@@ -403,17 +413,40 @@ mod tests {
         app.commands = Some(sender);
         app.screen = Screen::Room {
             name: "room".into(),
-            state: None,
+            state: Some(RoomState {
+                capacity: 2,
+                you: 0,
+                players: vec![],
+                cards: None,
+                pot: 15,
+                current_bet: 10,
+                min_raise_to: 20,
+                big_blind_amount: 10,
+                betting_complete: false,
+                paused: false,
+                street: tpokr::protocol::Street::Preflop,
+                board: vec![],
+                hand_number: 1,
+                game_over: false,
+                pots: vec![],
+                log: vec![],
+                payouts: vec![],
+            }),
         };
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(receiver.try_recv().unwrap(), Action::Check);
         app.handle_key(KeyCode::Char('l'), KeyModifiers::NONE);
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.editing_raise);
-        app.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
-        app.handle_key(KeyCode::Char('0'), KeyModifiers::NONE);
+        assert_eq!(app.raise_input, "10");
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(receiver.try_recv().unwrap(), Action::Raise { to: 20 });
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        app.raise_input = u64::MAX.to_string();
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.editing_raise);
+        assert!(receiver.try_recv().is_err());
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
         app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(matches!(app.screen, Screen::Select));
     }

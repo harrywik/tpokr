@@ -20,6 +20,7 @@ use rand::seq::SliceRandom;
 const MAX_MESSAGE: u64 = 4096;
 const MAX_LOG: usize = 40;
 const RESULT_DELAY: Duration = Duration::from_secs(5);
+const SHOWDOWN_DELAY: Duration = Duration::from_secs(60);
 
 type Outbox = SyncSender<Vec<u8>>;
 
@@ -272,7 +273,12 @@ impl Room {
                 }
             }
         } else if self.next_hand_at.is_none() {
-            self.next_hand_at = Some(Instant::now() + RESULT_DELAY);
+            let delay = if self.street == Street::Showdown {
+                SHOWDOWN_DELAY
+            } else {
+                RESULT_DELAY
+            };
+            self.next_hand_at = Some(Instant::now() + delay);
         }
     }
 
@@ -1474,6 +1480,37 @@ mod tests {
             2000
         );
         assert!(room.next_hand_at.is_none());
+    }
+
+    #[test]
+    fn showdown_waits_one_minute_before_next_hand() {
+        let (mut room, _peers, _receivers) = test_room(2);
+        room.betting.as_mut().unwrap().act(0, Action::Call).unwrap();
+        room.advance();
+        for _ in 0..4 {
+            for _ in 0..2 {
+                let id = room.betting.as_ref().unwrap().turn.unwrap();
+                room.betting
+                    .as_mut()
+                    .unwrap()
+                    .act(id, Action::Check)
+                    .unwrap();
+                room.advance();
+                if room.street == Street::Showdown {
+                    break;
+                }
+            }
+            if room.street == Street::Showdown {
+                break;
+            }
+        }
+        assert_eq!(room.street, Street::Showdown);
+        let deadline = room.next_hand_at.unwrap();
+        assert!(!room.tick(deadline - Duration::from_millis(1)));
+        assert_eq!(room.hand_number, 1);
+        assert!(room.tick(deadline));
+        assert_eq!(room.hand_number, 2);
+        assert_eq!(SHOWDOWN_DELAY, Duration::from_secs(60));
     }
 
     #[test]
