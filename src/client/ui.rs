@@ -159,6 +159,11 @@ fn prompt_lines(app: &App) -> Vec<Line<'static>> {
             let choice = app
                 .servers
                 .get(app.selected)
+                .or_else(|| {
+                    app.selected
+                        .checked_sub(app.servers.len())
+                        .and_then(|i| app.discovered.get(i).map(|(s, _)| s))
+                })
                 .map(|server| format!("  {}  ({})  ", server.name, server.address))
                 .unwrap_or_else(|| "  No servers. Press a to add one.  ".into());
             vec![
@@ -168,12 +173,12 @@ fn prompt_lines(app: &App) -> Vec<Line<'static>> {
                 Line::styled(
                     format!(
                         "{} / {}",
-                        if app.servers.is_empty() {
+                        if app.servers.is_empty() && app.discovered.is_empty() {
                             0
                         } else {
                             app.selected + 1
                         },
-                        app.servers.len()
+                        app.servers.len() + app.discovered.len()
                     ),
                     Style::default().fg(MUTED),
                 ),
@@ -213,6 +218,79 @@ fn prompt_lines(app: &App) -> Vec<Line<'static>> {
                 Style::default().fg(MUTED),
             ),
         ],
+        Screen::Discover => {
+            let index = app
+                .selected
+                .checked_sub(app.servers.len())
+                .filter(|&i| i < app.discovered.len())
+                .unwrap_or(0);
+            let choice = app
+                .discovered
+                .get(index)
+                .map(|(server, _)| server.address.clone())
+                .unwrap_or_else(|| "Listening for LAN beacons".into());
+            vec![
+                Line::styled("LAN servers", heading),
+                Line::from(""),
+                Line::styled(choice, selected),
+                Line::styled(
+                    format!(
+                        "{} / {}",
+                        if app.discovered.is_empty() {
+                            0
+                        } else {
+                            index + 1
+                        },
+                        app.discovered.len()
+                    ),
+                    Style::default().fg(MUTED),
+                ),
+            ]
+        }
+        Screen::Lobby {
+            server,
+            rooms,
+            selected: index,
+        } => {
+            let choice = rooms
+                .get(*index)
+                .map(|r| {
+                    format!(
+                        "{}  ({}/10, {})",
+                        r.name,
+                        r.players,
+                        if r.game_over {
+                            "finished"
+                        } else if r.started {
+                            "playing"
+                        } else {
+                            "waiting"
+                        }
+                    )
+                })
+                .unwrap_or_else(|| "No rooms yet".into());
+            vec![
+                Line::styled(format!("Rooms on {}", server.name), heading),
+                Line::from(""),
+                Line::styled(choice, selected),
+                Line::styled(
+                    format!(
+                        "{} / {}",
+                        if rooms.is_empty() { 0 } else { index + 1 },
+                        rooms.len()
+                    ),
+                    Style::default().fg(MUTED),
+                ),
+            ]
+        }
+        Screen::CreateRoom { name, .. } => vec![
+            Line::styled("Create room", heading),
+            Line::from(format!("Name: {name}")),
+            Line::styled(
+                "Letters, numbers, - or _; Enter creates",
+                Style::default().fg(MUTED),
+            ),
+        ],
         Screen::Delete => vec![
             Line::styled("Delete server?", heading),
             Line::from(app.servers[app.selected].name.clone()),
@@ -235,8 +313,10 @@ fn draw_prompt(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let text = match app.screen {
-        Screen::Select => "j/k  select   Enter  join   a  add   e  edit   d  delete   q  quit",
+        Screen::Select => "j/k select  Enter open  f LAN  a add  e edit  d delete  q quit",
         Screen::Room { .. } => "Esc / q  leave room",
+        Screen::Lobby { .. } => "j/k select  Enter join  c create  r refresh  Esc back",
+        Screen::Discover => "j/k select  Enter open  Esc back",
         _ => "Ctrl+C  quit",
     };
     let footer = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
@@ -260,8 +340,10 @@ fn draw_compact(frame: &mut Frame<'_>, area: Rect, app: &App) {
     lines.push(Line::from(""));
     lines.push(Line::styled(
         match app.screen {
-            Screen::Select => "j/k select  Enter join  a/e/d  q quit",
+            Screen::Select => "j/k select  Enter open  f LAN  a/e/d  q quit",
             Screen::Room { .. } => "Esc/q leave",
+            Screen::Lobby { .. } => "j/k select  Enter join  c create  r refresh  Esc back",
+            Screen::Discover => "j/k select  Enter open  Esc back",
             _ => "Ctrl+C quit",
         },
         Style::default().fg(MUTED),

@@ -1,5 +1,6 @@
 mod cards;
 mod config;
+mod lobby;
 mod network;
 mod ui;
 
@@ -61,6 +62,16 @@ enum Screen {
         field: usize,
     },
     Delete,
+    Lobby {
+        server: Server,
+        rooms: Vec<tpokr::protocol::RoomInfo>,
+        selected: usize,
+    },
+    CreateRoom {
+        server: Server,
+        name: String,
+    },
+    Discover,
     Room {
         name: String,
         state: Option<RoomState>,
@@ -85,10 +96,19 @@ struct App {
     action_message: Option<String>,
     receiver: Option<Receiver<network::Update>>,
     stop: Option<Arc<AtomicBool>>,
+    lobby_tx: Sender<lobby::Update>,
+    lobby_rx: Receiver<lobby::Update>,
+    discovery_tx: Sender<String>,
+    discovery_rx: Receiver<String>,
+    discovered: Vec<(Server, Instant)>,
+    discovery_stop: Arc<AtomicBool>,
+    room_server: Option<Server>,
 }
 
 impl App {
     fn new(servers: Vec<Server>) -> Self {
+        let (lobby_tx, lobby_rx) = mpsc::channel();
+        let (discovery_tx, discovery_rx) = mpsc::channel();
         Self {
             servers,
             session: new_session(),
@@ -107,6 +127,13 @@ impl App {
             action_message: None,
             receiver: None,
             stop: None,
+            lobby_tx,
+            lobby_rx,
+            discovery_tx,
+            discovery_rx,
+            discovered: Vec::new(),
+            discovery_stop: Arc::new(AtomicBool::new(false)),
+            room_server: None,
         }
     }
     fn disconnect(&mut self) {
@@ -123,6 +150,68 @@ impl App {
         self.action_message = None;
     }
     fn poll_network(&mut self) {
+        while let Ok(address) = self.discovery_rx.try_recv() {
+            if address.is_empty() {
+                self.message = Some("LAN discovery unavailable. Add a server manually.".into());
+                continue;
+            }
+            if self.servers.iter().any(|server| server.address == address) {
+                continue;
+            }
+            if let Some((_, seen)) = self
+                .discovered
+                .iter_mut()
+                .find(|(s, _)| s.address == address)
+            {
+                *seen = Instant::now();
+            } else if self.discovered.len() < 100 {
+                self.discovered.push((
+                    Server {
+                        name: "LAN server".into(),
+                        address,
+                    },
+                    Instant::now(),
+                ));
+            }
+        }
+        if matches!(self.screen, Screen::Select) {
+            self.discovered
+                .retain(|(_, seen)| seen.elapsed() < Duration::from_secs(95));
+        }
+        self.selected = self.selected.min(
+            self.servers
+                .len()
+                .saturating_add(self.discovered.len())
+                .saturating_sub(1),
+        );
+        while let Ok(update) = self.lobby_rx.try_recv() {
+            match update {
+                lobby::Update::Rooms(rooms) => {
+                    if let Screen::Lobby {
+                        rooms: current,
+                        selected,
+                        ..
+                    } = &mut self.screen
+                    {
+                        *current = rooms;
+                        *selected = (*selected).min(current.len().saturating_sub(1));
+                        self.message = None;
+                    }
+                }
+                lobby::Update::Created => {
+                    if let Screen::CreateRoom { server, .. } = &self.screen {
+                        let server = server.clone();
+                        lobby::refresh(server.address.clone(), self.lobby_tx.clone());
+                        self.screen = Screen::Lobby {
+                            server,
+                            rooms: Vec::new(),
+                            selected: 0,
+                        };
+                    }
+                }
+                lobby::Update::Error(error) => self.message = Some(error),
+            }
+        }
         if let Some(receiver) = &self.receiver {
             while let Ok(update) = receiver.try_recv() {
                 match update {
@@ -162,15 +251,20 @@ impl App {
             Screen::Select => match code {
                 KeyCode::Char('q') | KeyCode::Esc => return false,
                 KeyCode::Char('j') | KeyCode::Down => {
-                    if !self.servers.is_empty() {
-                        self.selected = (self.selected + 1) % self.servers.len();
+                    let count = self.servers.len() + self.discovered.len();
+                    if count > 0 {
+                        self.selected = (self.selected + 1) % count;
                     }
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    if !self.servers.is_empty() {
-                        self.selected =
-                            (self.selected + self.servers.len() - 1) % self.servers.len();
+                    let count = self.servers.len() + self.discovered.len();
+                    if count > 0 {
+                        self.selected = (self.selected + count - 1) % count;
                     }
+                }
+                KeyCode::Char('f') => {
+                    self.selected = self.servers.len();
+                    self.screen = Screen::Discover;
                 }
                 KeyCode::Char('a') => {
                     self.message = None;
@@ -181,7 +275,7 @@ impl App {
                         field: 0,
                     };
                 }
-                KeyCode::Char('e') if !self.servers.is_empty() => {
+                KeyCode::Char('e') if self.selected < self.servers.len() => {
                     let server = &self.servers[self.selected];
                     self.message = None;
                     self.screen = Screen::Edit {
@@ -191,32 +285,25 @@ impl App {
                         field: 0,
                     };
                 }
-                KeyCode::Char('d') if !self.servers.is_empty() => {
+                KeyCode::Char('d') if self.selected < self.servers.len() => {
                     self.message = None;
                     self.screen = Screen::Delete;
                 }
-                KeyCode::Enter if !self.servers.is_empty() => {
-                    let server = self.servers[self.selected].clone();
-                    let (sender, receiver) = mpsc::channel();
-                    let stop = Arc::new(AtomicBool::new(false));
-                    let (commands, command_receiver) = mpsc::channel();
-                    let token = self.session.clone();
-                    network::connect(
-                        server.address,
-                        token,
-                        self.profile.clone(),
-                        sender,
-                        command_receiver,
-                        Arc::clone(&stop),
-                    );
-                    self.commands = Some(commands);
-                    self.receiver = Some(receiver);
-                    self.stop = Some(stop);
-                    self.message = None;
-                    self.screen = Screen::Room {
-                        name: server.name,
-                        state: None,
-                    };
+                KeyCode::Enter => {
+                    let server = self.servers.get(self.selected).cloned().or_else(|| {
+                        self.selected
+                            .checked_sub(self.servers.len())
+                            .and_then(|i| self.discovered.get(i).map(|(s, _)| s.clone()))
+                    });
+                    if let Some(server) = server {
+                        lobby::refresh(server.address.clone(), self.lobby_tx.clone());
+                        self.message = Some("Loading rooms...".into());
+                        self.screen = Screen::Lobby {
+                            server,
+                            rooms: Vec::new(),
+                            selected: 0,
+                        };
+                    }
                 }
                 _ => {}
             },
@@ -293,6 +380,115 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Esc => self.screen = Screen::Select,
                 _ => {}
             },
+            Screen::Discover => match code {
+                KeyCode::Esc | KeyCode::Char('q') => self.screen = Screen::Select,
+                KeyCode::Char('j') | KeyCode::Down if !self.discovered.is_empty() => {
+                    self.selected = self.servers.len()
+                        + (self.selected.saturating_sub(self.servers.len()) + 1)
+                            % self.discovered.len()
+                }
+                KeyCode::Char('k') | KeyCode::Up if !self.discovered.is_empty() => {
+                    self.selected = self.servers.len()
+                        + (self.selected.saturating_sub(self.servers.len()) + self.discovered.len()
+                            - 1)
+                            % self.discovered.len()
+                }
+                KeyCode::Enter if !self.discovered.is_empty() => {
+                    let index = self
+                        .selected
+                        .checked_sub(self.servers.len())
+                        .filter(|&i| i < self.discovered.len())
+                        .unwrap_or(0);
+                    let server = self.discovered[index].0.clone();
+                    lobby::refresh(server.address.clone(), self.lobby_tx.clone());
+                    self.message = Some("Loading rooms...".into());
+                    self.screen = Screen::Lobby {
+                        server,
+                        rooms: Vec::new(),
+                        selected: 0,
+                    };
+                }
+                _ => {}
+            },
+            Screen::Lobby {
+                server,
+                rooms,
+                selected,
+            } => match code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.screen = Screen::Select;
+                    self.message = None;
+                }
+                KeyCode::Char('j') | KeyCode::Down if !rooms.is_empty() => {
+                    *selected = (*selected + 1) % rooms.len()
+                }
+                KeyCode::Char('k') | KeyCode::Up if !rooms.is_empty() => {
+                    *selected = (*selected + rooms.len() - 1) % rooms.len()
+                }
+                KeyCode::Char('r') => {
+                    lobby::refresh(server.address.clone(), self.lobby_tx.clone());
+                    self.message = Some("Loading rooms...".into());
+                }
+                KeyCode::Char('c') => {
+                    self.screen = Screen::CreateRoom {
+                        server: server.clone(),
+                        name: String::new(),
+                    };
+                    self.message = None;
+                }
+                KeyCode::Enter if !rooms.is_empty() => {
+                    let room = rooms[*selected].name.clone();
+                    self.room_server = Some(server.clone());
+                    let (sender, receiver) = mpsc::channel();
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let (commands, command_receiver) = mpsc::channel();
+                    network::connect(
+                        server.address.clone(),
+                        self.session.clone(),
+                        self.profile.clone(),
+                        room.clone(),
+                        sender,
+                        command_receiver,
+                        Arc::clone(&stop),
+                    );
+                    self.commands = Some(commands);
+                    self.receiver = Some(receiver);
+                    self.stop = Some(stop);
+                    self.message = None;
+                    self.screen = Screen::Room {
+                        name: room,
+                        state: None,
+                    };
+                }
+                _ => {}
+            },
+            Screen::CreateRoom { server, name } => match code {
+                KeyCode::Esc => {
+                    let server = server.clone();
+                    lobby::refresh(server.address.clone(), self.lobby_tx.clone());
+                    self.screen = Screen::Lobby {
+                        server,
+                        rooms: Vec::new(),
+                        selected: 0,
+                    };
+                    self.message = None;
+                }
+                KeyCode::Backspace => {
+                    name.pop();
+                }
+                KeyCode::Char(c)
+                    if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                        && name.len() < 32 =>
+                {
+                    name.push(c)
+                }
+                KeyCode::Enter if !name.is_empty() => {
+                    lobby::create(server.address.clone(), name.clone(), self.lobby_tx.clone());
+                    self.message = Some("Creating room...".into());
+                }
+                _ => {}
+            },
             Screen::Room { state, .. } => {
                 if self.confirming_cash_out {
                     match code {
@@ -339,6 +535,14 @@ impl App {
                     }
                 } else {
                     match code {
+                        KeyCode::Char('s')
+                            if state.as_ref().is_some_and(|s| s.hand_number == 0) =>
+                        {
+                            if let Some(sender) = &self.commands {
+                                let _ = sender.send(Action::Start);
+                            }
+                            self.action_message = Some("Sending start...".into());
+                        }
                         KeyCode::Char('k') | KeyCode::Up => {
                             self.log_offset = self.log_offset.saturating_add(1)
                         }
@@ -379,7 +583,16 @@ impl App {
                         }
                         KeyCode::Esc | KeyCode::Char('q') => {
                             self.disconnect();
-                            self.screen = Screen::Select;
+                            if let Some(server) = self.room_server.take() {
+                                lobby::refresh(server.address.clone(), self.lobby_tx.clone());
+                                self.screen = Screen::Lobby {
+                                    server,
+                                    rooms: Vec::new(),
+                                    selected: 0,
+                                };
+                            } else {
+                                self.screen = Screen::Select;
+                            }
                         }
                         _ => {}
                     }
@@ -392,6 +605,7 @@ impl App {
 impl Drop for App {
     fn drop(&mut self) {
         self.disconnect();
+        self.discovery_stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -449,6 +663,45 @@ mod tests {
         app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
         app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(matches!(app.screen, Screen::Select));
+    }
+
+    #[test]
+    fn lobby_controls_and_start_game() {
+        let mut app = App::new(vec![server("one")]);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(app.screen, Screen::Lobby { .. }));
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(matches!(app.screen, Screen::CreateRoom { .. }));
+        app.handle_key(KeyCode::Char('A'), KeyModifiers::NONE);
+        assert!(matches!(&app.screen, Screen::CreateRoom { name, .. } if name == "A"));
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(app.screen, Screen::Lobby { .. }));
+        app.screen = Screen::Room {
+            name: "room".into(),
+            state: Some(RoomState {
+                capacity: 2,
+                you: 0,
+                players: vec![],
+                cards: None,
+                pot: 0,
+                current_bet: 0,
+                min_raise_to: 10,
+                big_blind_amount: 10,
+                betting_complete: false,
+                paused: false,
+                street: tpokr::protocol::Street::Preflop,
+                board: vec![],
+                hand_number: 0,
+                game_over: false,
+                pots: vec![],
+                log: vec![],
+                payouts: vec![],
+            }),
+        };
+        let (sender, receiver) = mpsc::channel();
+        app.commands = Some(sender);
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert_eq!(receiver.try_recv().unwrap(), Action::Start);
     }
 
     #[test]
@@ -522,6 +775,7 @@ pub fn run() -> io::Result<()> {
         ));
     }
     let mut app = App::new(servers);
+    lobby::discover(app.discovery_tx.clone(), Arc::clone(&app.discovery_stop));
     app.session = config::session(&profile)?;
     app.profile = profile;
     let mut next_frame = Instant::now();

@@ -21,12 +21,13 @@ pub(super) fn connect(
     address: String,
     token: String,
     profile: String,
+    room: String,
     sender: Sender<Update>,
     commands: Receiver<Action>,
     stop: Arc<AtomicBool>,
 ) {
     thread::spawn(move || {
-        if let Err(error) = run(&address, &token, &profile, &sender, &commands, &stop)
+        if let Err(error) = run(&address, &token, &profile, &room, &sender, &commands, &stop)
             && !stop.load(Ordering::Relaxed)
         {
             let _ = sender.send(Update::Error(error.to_string()));
@@ -38,6 +39,7 @@ fn run(
     address: &str,
     token: &str,
     profile: &str,
+    room: &str,
     sender: &Sender<Update>,
     commands: &Receiver<Action>,
     stop: &AtomicBool,
@@ -65,6 +67,7 @@ fn run(
             params: None,
             session: Some(token.to_owned()),
             profile: Some(profile.to_owned()),
+            room: Some(room.to_owned()),
         },
     )?;
     stream.write_all(b"\n")?;
@@ -88,6 +91,7 @@ fn run(
                         params: Some(action),
                         session: None,
                         profile: None,
+                        room: None,
                     },
                 )?;
                 stream.write_all(b"\n")?;

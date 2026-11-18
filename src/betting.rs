@@ -214,7 +214,7 @@ impl Betting {
                 Some(to)
             }
             Action::AllIn => Some(max),
-            Action::CashOut => return Err("cash out is handled by the room"),
+            Action::CashOut | Action::Start => return Err("action is handled by the room"),
         };
         if let Some(to) = target
             && to > self.current_bet
@@ -271,7 +271,7 @@ impl Betting {
                 seat.status = PlayerStatus::AllIn;
                 format!("all-in to {}", seat.bet)
             }
-            Action::CashOut => unreachable!(),
+            Action::CashOut | Action::Start => unreachable!(),
         };
         let new_bet = seat.bet;
         self.pending.remove(&id);

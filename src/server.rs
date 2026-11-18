@@ -13,7 +13,7 @@ use std::{
 use crate::betting::{BIG_BLIND, Betting, SMALL_BLIND, STARTING_STACK};
 use crate::protocol::{
     Action, Card, LogEntry, Notification, Payout, PlayerStatus, PlayerView, Request, Response,
-    RoomState, RpcError, Street, Suit,
+    RoomInfo, RoomState, RpcError, Street, Suit,
 };
 use rand::seq::SliceRandom;
 
@@ -89,6 +89,7 @@ struct Room {
     hand_number: u64,
     game_over: bool,
     next_hand_at: Option<Instant>,
+    empty_since: Instant,
 }
 
 impl Room {
@@ -117,6 +118,7 @@ impl Room {
             hand_number: 0,
             game_over: false,
             next_hand_at: None,
+            empty_since: Instant::now(),
         })
     }
 
@@ -174,8 +176,11 @@ impl Room {
             self.record_player(id, "rejoined".into());
             return Ok(id);
         }
-        if self.dealt || self.players.len() >= self.capacity {
-            return Err("room is full or the hand has already started");
+        if self.players.len() >= self.capacity {
+            return Err("room is full");
+        }
+        if self.game_over {
+            return Err("game is over; create a new room");
         }
         let id = self.next_id;
         self.next_id += 1;
@@ -194,12 +199,20 @@ impl Room {
             },
         );
         self.record_player(id, "joined".into());
-        if self.players.len() == self.capacity {
-            self.dealt = true;
-            self.start_hand();
-            self.advance();
-        }
         Ok(id)
+    }
+
+    fn start_game(&mut self) -> Result<(), &'static str> {
+        if self.dealt {
+            return Err("game already started");
+        }
+        if self.players.len() < 2 {
+            return Err("at least two players are required");
+        }
+        self.dealt = true;
+        self.start_hand();
+        self.advance();
+        Ok(())
     }
 
     fn start_hand(&mut self) {
@@ -334,7 +347,7 @@ impl Room {
         let small_blind = self.betting.as_ref().map(|b| b.small_blind);
         let big_blind = self.betting.as_ref().map(|b| b.big_blind);
         self.players.get(&id).map(|player| RoomState {
-            capacity: self.capacity,
+            capacity: self.players.len().max(2),
             you: id,
             players: self
                 .players
@@ -598,30 +611,44 @@ impl Room {
         } else if self.players.contains_key(&id) {
             self.record_player(id, "left".into());
             self.players.remove(&id);
+            if self.players.is_empty() {
+                self.empty_since = Instant::now();
+            }
         }
         self.broadcast();
     }
 }
 
-pub fn serve(listener: TcpListener, capacity: usize) -> io::Result<()> {
-    let room = Arc::new(Mutex::new(Room::new(capacity)?));
-    let timer_room = Arc::downgrade(&room);
+type Rooms = Arc<Mutex<BTreeMap<String, Arc<Mutex<Room>>>>>;
+
+pub fn serve(listener: TcpListener) -> io::Result<()> {
+    let address = listener.local_addr()?;
+    crate::discovery::beacon(address)?;
+    let rooms: Rooms = Arc::new(Mutex::new(BTreeMap::new()));
+    let timer_rooms = Arc::downgrade(&rooms);
     thread::spawn(move || {
         loop {
             thread::sleep(Duration::from_millis(100));
-            let Some(room) = timer_room.upgrade() else {
+            let Some(rooms) = timer_rooms.upgrade() else {
                 break;
             };
-            let Ok(mut room) = room.lock() else { break };
-            room.tick(Instant::now());
+            let snapshot: Vec<_> = match rooms.lock() {
+                Ok(map) => map.values().cloned().collect(),
+                Err(_) => break,
+            };
+            for room in snapshot {
+                if let Ok(mut room) = room.lock() {
+                    room.tick(Instant::now());
+                }
+            }
         }
     });
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let room = Arc::clone(&room);
+                let rooms = Arc::clone(&rooms);
                 thread::spawn(move || {
-                    if let Err(error) = handle_client(stream, &room) {
+                    if let Err(error) = route_client(stream, &rooms) {
                         eprintln!("client disconnected: {error}");
                     }
                 });
@@ -632,7 +659,122 @@ pub fn serve(listener: TcpListener, capacity: usize) -> io::Result<()> {
     Ok(())
 }
 
+fn route_client(mut stream: TcpStream, rooms: &Rooms) -> io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    // Read only the first line, leaving any following bytes for the room handler.
+    let mut bytes = Vec::new();
+    loop {
+        let mut byte = [0];
+        stream.read_exact(&mut byte)?;
+        bytes.push(byte[0]);
+        if bytes.len() > MAX_MESSAGE as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "request too long",
+            ));
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    let request: Request = serde_json::from_slice(&bytes)?;
+    if request.jsonrpc != "2.0" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected JSON-RPC 2.0",
+        ));
+    }
+    if request.method == "join" {
+        let name = request.room.as_deref().unwrap_or("");
+        let room = rooms
+            .lock()
+            .map_err(|_| io::Error::other("rooms lock poisoned"))?
+            .get(name)
+            .cloned();
+        if let Some(room) = room {
+            return handle_client_first(stream, &room, Some(bytes));
+        }
+        let response = serde_json::json!({"jsonrpc":"2.0", "id":request.id, "error":{"code":-32000,"message":"room not found"}});
+        serde_json::to_writer(&mut stream, &response)?;
+        stream.write_all(b"\n")?;
+        return Ok(());
+    }
+    let outcome: Result<serde_json::Value, &str> = match request.method.as_str() {
+        "rooms" => {
+            let map = rooms
+                .lock()
+                .map_err(|_| io::Error::other("rooms lock poisoned"))?;
+            let mut list = Vec::new();
+            for (name, room) in map.iter() {
+                let room = room
+                    .lock()
+                    .map_err(|_| io::Error::other("room lock poisoned"))?;
+                list.push(RoomInfo {
+                    name: name.clone(),
+                    players: room.players.len(),
+                    started: room.dealt,
+                    game_over: room.game_over,
+                });
+            }
+            Ok(serde_json::to_value(list)?)
+        }
+        "create_room" => {
+            let name = request.room.as_deref().unwrap_or("");
+            if name.is_empty()
+                || name.len() > 32
+                || !name
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+            {
+                Err("room name must contain 1-32 letters, numbers, '-' or '_'")
+            } else {
+                let mut map = rooms
+                    .lock()
+                    .map_err(|_| io::Error::other("rooms lock poisoned"))?;
+                map.retain(|_, room| {
+                    if Arc::strong_count(room) > 1 {
+                        return true;
+                    }
+                    room.lock().map_or(true, |room| {
+                        !(room.players.is_empty()
+                            && !room.dealt
+                            && room.empty_since.elapsed() > Duration::from_secs(300))
+                    })
+                });
+                if map.contains_key(name) {
+                    Err("room already exists")
+                } else if map.len() >= 100 {
+                    Err("server room limit reached")
+                } else {
+                    map.insert(name.to_owned(), Arc::new(Mutex::new(Room::new(10)?)));
+                    Ok(serde_json::json!(true))
+                }
+            }
+        }
+        _ => Err("unknown method"),
+    };
+    let response = match outcome {
+        Ok(result) => serde_json::json!({"jsonrpc":"2.0", "id":request.id, "result":result}),
+        Err(message) => {
+            serde_json::json!({"jsonrpc":"2.0", "id":request.id, "error":{"code":-32000,"message":message}})
+        }
+    };
+    serde_json::to_writer(&mut stream, &response)?;
+    stream.write_all(b"\n")?;
+    Ok(())
+}
+
+#[cfg(test)]
 fn handle_client(stream: TcpStream, room: &Mutex<Room>) -> io::Result<()> {
+    handle_client_first(stream, room, None)
+}
+
+fn handle_client_first(
+    stream: TcpStream,
+    room: &Mutex<Room>,
+    mut first: Option<Vec<u8>>,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -649,10 +791,14 @@ fn handle_client(stream: TcpStream, room: &Mutex<Room>) -> io::Result<()> {
     let mut player = None;
     let result = (|| -> io::Result<()> {
         loop {
-            let mut bytes = Vec::new();
-            let size = (&mut reader)
-                .take(MAX_MESSAGE + 1)
-                .read_until(b'\n', &mut bytes)?;
+            let mut bytes = first.take().unwrap_or_default();
+            let size = if bytes.is_empty() {
+                (&mut reader)
+                    .take(MAX_MESSAGE + 1)
+                    .read_until(b'\n', &mut bytes)?
+            } else {
+                bytes.len()
+            };
             if size == 0 {
                 break;
             }
@@ -684,6 +830,9 @@ fn handle_client(stream: TcpStream, room: &Mutex<Room>) -> io::Result<()> {
                         Err(error) => Err(error),
                     },
                     ("join", Some(_)) => Err("already joined"),
+                    ("act", Some(id)) if request.params == Some(Action::Start) => {
+                        room.start_game().map(|()| room.state(id).unwrap())
+                    }
                     ("act", Some(id)) if request.params == Some(Action::CashOut) => {
                         room.cash_out(id).map(|()| room.state(id).unwrap())
                     }
@@ -771,6 +920,7 @@ mod tests {
                 params: None,
                 session: Some(token.into()),
                 profile: Some("test".into()),
+                room: None,
             },
         )
         .unwrap();
@@ -804,6 +954,14 @@ mod tests {
         (stream, reader, handler)
     }
 
+    fn start_network(room: &Arc<Mutex<Room>>, readers: &mut [&mut BufReader<TcpStream>]) {
+        room.lock().unwrap().start_game().unwrap();
+        room.lock().unwrap().broadcast();
+        for reader in readers {
+            receive(reader);
+        }
+    }
+
     #[test]
     fn assigns_blind_positions_only_after_room_fills() {
         for capacity in [2, 3, 10] {
@@ -829,6 +987,7 @@ mod tests {
                     );
                 }
             }
+            room.start_game().unwrap();
             let players = room.state(0).unwrap().players;
             assert!(players[0].dealer);
             assert!(players[if capacity == 2 { 0 } else { 1 }].small_blind);
@@ -855,6 +1014,7 @@ mod tests {
                 peers.push(peer);
                 receivers.push(receiver);
             }
+            room.start_game().unwrap();
             let cards: HashSet<_> = room
                 .players
                 .values()
@@ -876,9 +1036,13 @@ mod tests {
         assert_eq!(receive(&mut ar)["method"], "room.updated");
         let (mut b, mut br, bh) = connect(&listener, &room);
         send_join(&mut b);
-        let b_state: RoomState =
-            serde_json::from_value(receive(&mut br)["result"].clone()).unwrap();
+        receive(&mut br);
+        receive(&mut br);
+        receive(&mut ar);
+        room.lock().unwrap().start_game().unwrap();
+        room.lock().unwrap().broadcast();
         let b_notification: Notification = serde_json::from_value(receive(&mut br)).unwrap();
+        let b_state = b_notification.params.clone();
         let a_notification: Notification = serde_json::from_value(receive(&mut ar)).unwrap();
         let ac = a_notification.params.cards.unwrap();
         let bc = b_state.cards.unwrap();
@@ -922,6 +1086,7 @@ mod tests {
         receive(&mut br);
         receive(&mut br);
         receive(&mut ar);
+        start_network(&room, &mut [&mut ar, &mut br]);
         let request = |id, action| Request {
             jsonrpc: "2.0".into(),
             id,
@@ -929,6 +1094,7 @@ mod tests {
             params: Some(action),
             session: None,
             profile: None,
+            room: None,
         };
         serde_json::to_writer(&mut b, &request(2, crate::protocol::Action::Check)).unwrap();
         b.write_all(b"\n").unwrap();
@@ -970,8 +1136,13 @@ mod tests {
         send_join(&mut c);
         receive(&mut cr);
         receive(&mut cr);
+        receive(&mut ar);
+        receive(&mut br);
+        room.lock().unwrap().start_game().unwrap();
+        room.lock().unwrap().broadcast();
         let a_state: Notification = serde_json::from_value(receive(&mut ar)).unwrap();
         receive(&mut br);
+        receive(&mut cr);
         let cards = a_state.params.cards;
         let (mut duplicate, mut dr, dh) = connect(&listener, &room);
         send_join_token(&mut duplicate, &token);
@@ -1021,7 +1192,127 @@ mod tests {
             peers.push(peer);
             receivers.push(receiver);
         }
+        room.start_game().unwrap();
         (room, peers, receivers)
+    }
+
+    #[test]
+    fn variable_room_start_and_late_join() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut room = Room::new(10).unwrap();
+        let mut peers = Vec::new();
+        let mut receivers = Vec::new();
+        for id in 0..3 {
+            let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (socket, _) = listener.accept().unwrap();
+            let (sender, receiver) = mpsc::sync_channel(32);
+            room.join(sender, socket, &format!("{id:064x}"), "test")
+                .unwrap();
+            peers.push(peer);
+            receivers.push(receiver);
+            if id == 0 {
+                assert!(room.start_game().is_err());
+            }
+            if id == 1 {
+                room.start_game().unwrap();
+            }
+        }
+        assert!(room.start_game().is_err());
+        assert_eq!(room.hand_number, 1);
+        assert!(room.state(2).unwrap().cards.is_none());
+        assert!(!room.betting.as_ref().unwrap().seats.contains_key(&2));
+        room.betting.as_mut().unwrap().act(0, Action::Fold).unwrap();
+        room.advance();
+        room.leave(2);
+        assert!(!room.state(0).unwrap().players[2].online);
+        let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (socket, _) = listener.accept().unwrap();
+        let (sender, receiver) = mpsc::sync_channel(32);
+        assert_eq!(
+            room.join(sender, socket, &format!("{:064x}", 2), "test")
+                .unwrap(),
+            2
+        );
+        peers.push(peer);
+        receivers.push(receiver);
+        room.start_hand();
+        assert_eq!(room.hand_number, 2);
+        assert!(room.state(2).unwrap().cards.is_some());
+        assert!(room.betting.as_ref().unwrap().seats.contains_key(&2));
+        assert!(room.state(0).unwrap().players[2].revealed_cards.is_none());
+    }
+
+    #[test]
+    fn separate_rooms_are_isolated_through_rpc() {
+        let rooms: Rooms = Arc::new(Mutex::new(BTreeMap::new()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let request = |method: &str, name: Option<&str>, token: Option<&str>| Request {
+            jsonrpc: "2.0".into(),
+            id: 1,
+            method: method.into(),
+            params: None,
+            session: token.map(str::to_owned),
+            profile: Some("test".into()),
+            room: name.map(str::to_owned),
+        };
+        let call = |request: Request| {
+            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let (server, _) = listener.accept().unwrap();
+            let rooms = rooms.clone();
+            let handler = thread::spawn(move || route_client(server, &rooms).unwrap());
+            serde_json::to_writer(&mut client, &request).unwrap();
+            client.write_all(b"\n").unwrap();
+            (client.try_clone().unwrap(), BufReader::new(client), handler)
+        };
+        for name in ["red", "blue"] {
+            let (client, mut reader, handler) = call(request("create_room", Some(name), None));
+            assert_eq!(receive(&mut reader)["result"], true);
+            drop(client);
+            drop(reader);
+            handler.join().unwrap();
+        }
+        let (client, mut reader, handler) = call(request("rooms", None, None));
+        assert_eq!(receive(&mut reader)["result"].as_array().unwrap().len(), 2);
+        drop(client);
+        drop(reader);
+        handler.join().unwrap();
+        let token = "aa".repeat(32);
+        let (red, mut red_reader, red_handler) = call(request("join", Some("red"), Some(&token)));
+        assert_eq!(
+            receive(&mut red_reader)["result"]["players"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        receive(&mut red_reader);
+        let (blue, mut blue_reader, blue_handler) =
+            call(request("join", Some("blue"), Some(&token)));
+        assert_eq!(
+            receive(&mut blue_reader)["result"]["players"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        receive(&mut blue_reader);
+        assert_eq!(
+            rooms.lock().unwrap()["red"].lock().unwrap().players.len(),
+            1
+        );
+        assert_eq!(
+            rooms.lock().unwrap()["blue"].lock().unwrap().players.len(),
+            1
+        );
+        drop(red);
+        drop(red_reader);
+        red_handler.join().unwrap();
+        drop(blue);
+        drop(blue_reader);
+        blue_handler.join().unwrap();
     }
 
     #[test]
@@ -1355,6 +1646,7 @@ mod tests {
         receive(&mut br);
         receive(&mut br);
         receive(&mut ar);
+        start_network(&room, &mut [&mut ar, &mut br]);
         serde_json::to_writer(
             &mut a,
             &Request {
@@ -1364,6 +1656,7 @@ mod tests {
                 params: Some(Action::Fold),
                 session: None,
                 profile: None,
+                room: None,
             },
         )
         .unwrap();
@@ -1528,6 +1821,7 @@ mod tests {
             peers.push(peer);
             receivers.push(receiver);
         }
+        room.start_game().unwrap();
         let original = room.state(2).unwrap().cards;
         room.leave(2);
         let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -1562,6 +1856,7 @@ mod tests {
         receive(&mut br);
         receive(&mut br);
         receive(&mut ar);
+        start_network(&room, &mut [&mut ar, &mut br]);
         drop(b);
         drop(br);
         bh.join().unwrap();
@@ -1576,6 +1871,7 @@ mod tests {
                     params: Some(action),
                     session: None,
                     profile: None,
+                    room: None,
                 },
             )
             .unwrap();

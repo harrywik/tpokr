@@ -71,11 +71,7 @@ pub(super) fn draw_table(
     let table = columns[1];
     frame.render_widget(
         Block::default()
-            .title(format!(
-                " Table  {}/{} ",
-                state.players.len(),
-                state.capacity
-            ))
+            .title(format!(" Table  {}/{} ", state.players.len(), 10))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(GOLD))
             .style(Style::default().bg(PANEL)),
@@ -201,7 +197,10 @@ pub(super) fn draw_table(
             for index in 0..2 {
                 let face = if let Some(cards) = visible {
                     CardFace::Up(cards[index])
-                } else if player.viewer || state.hand_number == 0 {
+                } else if player.viewer
+                    || player.status == PlayerStatus::Waiting
+                    || state.hand_number == 0
+                {
                     CardFace::Empty
                 } else {
                     CardFace::Down
@@ -361,8 +360,10 @@ fn draw_action_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
             "Showdown. Next hand starts after one minute.".into()
         } else if state.street == Street::Finished {
             "Hand complete. Next hand starts shortly if enough players remain.".into()
+        } else if state.hand_number == 0 {
+            "Waiting for players. Press s to start with 2-10 players.".into()
         } else if state.cards.is_none() {
-            "Waiting for players".into()
+            "Waiting for the next hand.".into()
         } else {
             format!(
                 "{:?}  |  Bet {}  |  Minimum raise to {}",
@@ -421,7 +422,7 @@ fn draw_small(
         lines.push(Line::raw(format!(
             "Players: {}/{}  Pot: {}",
             state.players.len(),
-            state.capacity,
+            10,
             state.pot
         )));
         lines.push(Line::raw(match state.cards {
@@ -468,7 +469,10 @@ fn draw_small(
                         card_text(cards[0], app.card_theme.ascii),
                         card_text(cards[1], app.card_theme.ascii)
                     )
-                } else if player.viewer || state.hand_number == 0 {
+                } else if player.viewer
+                    || player.status == PlayerStatus::Waiting
+                    || state.hand_number == 0
+                {
                     "-- --".into()
                 } else {
                     "## ##".into()
@@ -542,9 +546,13 @@ fn draw_small(
             total.map_or_else(|| "-".into(), |value| value.to_string())
         )
     } else {
-        app.action_message
-            .clone()
-            .unwrap_or_else(|| "Enter: act".into())
+        app.action_message.clone().unwrap_or_else(|| {
+            if state.is_some_and(|s| s.hand_number == 0) {
+                "s: start game".into()
+            } else {
+                "Enter: act".into()
+            }
+        })
     };
     lines.push(Line::styled(hint, Style::default().fg(MUTED)));
     lines.push(Line::styled(

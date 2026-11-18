@@ -47,11 +47,14 @@ pub struct Request {
     pub session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
+    Start,
     Check,
     Call,
     Fold,
@@ -68,6 +71,14 @@ pub struct Response {
     pub result: Option<RoomState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RpcError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomInfo {
+    pub name: String,
+    pub players: usize,
+    pub started: bool,
+    pub game_over: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
